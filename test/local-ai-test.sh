@@ -235,6 +235,22 @@ pass "Hermes opens on the gateway through --provider custom, without its own con
 [[ ! -d $STATE/deploy/$ID && -z $(ls "$SHIM/containers") ]] || fail "stop" "$(ls "$SHIM/containers" "$STATE/deploy")"
 pass "stop removes both containers and the model's folder"
 
+# the engine restarts with the machine, so what it mounts (a config asset, by-path links) must outlive a reboot:
+# a source in /run or XDG_RUNTIME_DIR is gone after one, and Docker mounts an empty directory in its place
+jq -c '.hardware["rtx-4090-24gb"].recipes[0].asset = {name: "config.yml", mountPath: "/app/config.yml", text: "model: x"}' \
+  "$TMP/plugin/recipes.json" >"$TMP/r2" && mv "$TMP/r2" "$TMP/plugin/recipes.json"
+: >"$SHIM/docker.log"
+"$CLI" run "$ID" nvidia:0
+wait_for ready
+engine=$(grep -- '--name omarchy-local-ai-.*-engine' "$SHIM/docker.log")
+src=$(grep -o -- '--volume [^ ]*:/app/config.yml:ro' <<<"$engine" | cut -d' ' -f2 | cut -d: -f1)
+[[ -n $src && $(cat "$src") == "model: x" && $src != "$XDG_RUNTIME_DIR"/* && $src != /run/* ]] || fail "asset mount" "$engine"
+! grep -qE -- "--volume ($XDG_RUNTIME_DIR|/run)/" <<<"$engine" || fail "engine mounts from a tmpfs" "$engine"
+"$CLI" stop "$ID"
+[[ ! -e $src && ! -e ${src%/*} ]] || fail "stop leaves the engine's files" "$(ls -la "${src%/*}")"
+recipes "$PIN"
+pass "the engine's config asset lives on persistent storage, so it survives a reboot, and stop removes it"
+
 # a 5.x install left a model running: its ledger names it, its containers carry no uid label
 echo '{"slots":{"old-model":{"keys":["nvidia:0"],"port":12434,"engine":"omarchy-local-ai-old-model-engine"}}}' >"$STATE/ledger.json"
 echo "1|" >"$SHIM/containers/omarchy-local-ai-old-model-engine"

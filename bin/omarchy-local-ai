@@ -288,14 +288,18 @@ ours() {
   [[ $l == "1|${PKEXEC_UID:-$(id -u)}" || $l == "1|" ]]
 }
 
-# rundir <id>: what the start writes for the engine (the config asset, its GPUs' by-path links); root's is in /run
-rundir() {
+# runroot: where the start writes what the engine mounts (the config asset, its GPUs' by-path links). The engine
+# restarts with the machine, so this is persistent storage, never /run or XDG_RUNTIME_DIR: a mount source missing
+# after a reboot comes back as an empty directory and the engine crash-loops. Root's is its own, under /var/lib, so
+# it never writes through a path the user controls; the docker group's runs as the user, in the user's state.
+runroot() {
   if ((EUID == 0)); then
-    echo "/run/omarchy-local-ai/$PKEXEC_UID/$1"
+    echo "/var/lib/omarchy-local-ai/$PKEXEC_UID"
   else
-    echo "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-local-ai/$1"
+    echo "$STATE/run"
   fi
 }
+rundir() { echo "$(runroot)/$1"; }
 
 remove() {
   local c
@@ -411,7 +415,7 @@ phase_share() {
   serve "$p" "$2"
 }
 
-# This user's containers and networks, and the engine images the recipes name (Docker keeps any another container uses)
+# This user's containers, networks and engine mounts, and the engine images the recipes name (Docker keeps any another container uses)
 phase_purge() {
   local c
   for c in $(docker ps -aq --filter "label=$LABEL=1"); do
@@ -419,6 +423,7 @@ phase_purge() {
   done
   docker network ls -q --filter "label=$LABEL=1" | xargs -r docker network rm >/dev/null 2>&1 || true
   jq -r '.gateway.image, .hardware[].recipes[].image' "$RECIPES" | sort -u | xargs -r docker rmi >/dev/null 2>&1 || true
+  rm -rf -- "$(runroot)"
 }
 
 # fail <message>: take the containers down and stop with the message
