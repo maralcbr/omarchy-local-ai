@@ -306,6 +306,13 @@ remove() {
   rm -rf -- "$(rundir "$1")"
 }
 
+# pull <image> <what>: a line each time a layer lands, from the per-layer lines docker prints when it has no terminal;
+# each layer counts once, as the containerd store can announce a layer and then find it already there
+pull() {
+  docker pull "$1" | awk -v what="$2" '/: (Pulling fs layer|Already exists)$/ && !($1 in all) { all[$1]; n++ }
+    /: (Pull complete|Already exists)$/ && !($1 in done) { done[$1]; printf "downloading the %s: %d of %d layers\n", what, ++d, n; fflush() }'
+}
+
 # phase_start <id> <port> <key>: re-read the recipe here, check every path, build both containers
 phase_start() {
   valid_id "$1" && [[ $2 =~ ^[0-9]+$ ]] && (($2 >= 12434 && $2 < 12450)) || die "invalid request"
@@ -330,9 +337,13 @@ phase_start() {
   fi
   owned "$KEY"
   owned "$STATE/usage/$id"
-  for v in "$(jq -r .image <<<"$r")" "$(jq -r .gateway.image "$RECIPES")"; do
-    docker image inspect "$v" >/dev/null 2>&1 || docker pull -q "$v" >&2 || die "could not pull $v"
+  # each line on stdout is the widget's next step: the worker reads them, so the password prompt is not left showing
+  for v in "engine|$(jq -r .image <<<"$r")" "gateway|$(jq -r .gateway.image "$RECIPES")"; do
+    docker image inspect "${v#*|}" >/dev/null 2>&1 && continue
+    echo "downloading the ${v%%|*} (first start only)"
+    pull "${v#*|}" "${v%%|*}" || die "could not pull ${v#*|}"
   done
+  echo "starting the engine"
 
   remove "$id"
   run=$(rundir "$id")
@@ -460,7 +471,7 @@ worker_run() {
     status "$WID" starting "starting the engine (the first start downloads it, a few GB)" 0
   fi
   NID=$(notify -p "Starting $WNAME" "Loading it on $(gpus | jq -r --arg k "$1" --argjson n $# '[.[] | select(.key == $k) | .name][0] | if $n > 1 then "\($n) × \(.)" else . end'). This takes a few minutes.")
-  elevate start "$WID" "$PORTNUM" "$@"
+  elevate start "$WID" "$PORTNUM" "$@" | while IFS= read -r w; do status "$WID" starting "$w" 0; done
 
   # the last load of this recipe, on any card, sets the pace of the percentage; before one, 6 s per GB
   t0=$SECONDS

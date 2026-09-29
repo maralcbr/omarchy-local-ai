@@ -58,7 +58,7 @@ c=$SHIM/containers
 case $1 in
 info) echo "Runtimes: nvidia runc" ;;
 image) exit 1 ;;
-pull) : ;;
+pull) printf "l1: Pulling fs layer\nl2: Pulling fs layer\nl2: Already exists\nl1: Download complete\nl1: Pull complete\n" ;;
 network) : ;;
 run) n=""; for ((i = 1; i <= $#; i++)); do [[ ${!i} == --name ]] && { j=$((i + 1)); n=${!j}; }; done; echo "1|$(id -u)" >"$c/$n" ;;
 inspect) n=${@: -1}; [[ -f $c/$n ]] || exit 1; [[ $* == *RestartCount* ]] && echo 0 || cat "$c/$n" ;;
@@ -169,6 +169,9 @@ if command -v node >/dev/null; then
   pass "the view model builds home and the model's page for a running model"
 fi
 pass "run downloads the weights, starts the engine and the gateway, and waits until the model answers"
+[[ $(grep -o "starting .*" "$STATE/log" | paste -sd'|') == *"|starting downloading the engine (first start only)|starting downloading the engine: 1 of 2 layers|starting downloading the engine: 2 of 2 layers|starting downloading the gateway (first start only)|starting downloading the gateway: 1 of 2 layers|starting downloading the gateway: 2 of 2 layers|starting starting the engine|"* ]] ||
+  fail "start steps" "$(cat "$STATE/log")"
+pass "once past the password the start reports each image's download, a line as each layer lands (once each), then its start"
 [[ -f $HOME/.cache/omarchy/local-ai/models/test--model@000000000000/model.safetensors ]] || fail "weights" "$(find "$HOME/.cache" -type f)"
 pass "the weights land under the model cache, checked against the Hub's size and sha256"
 engine=$(grep -- '--name omarchy-local-ai-.*-engine' "$SHIM/docker.log")
