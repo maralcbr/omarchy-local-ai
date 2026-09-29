@@ -265,3 +265,43 @@ wait_for error
 grep -qx "$CLI __start $ID 12434 nvidia:0" "$SHIM/pkexec.log" || fail "pkexec argv" "$(cat "$SHIM/pkexec.log")"
 [[ $(jq -r .error "$STATE/deploy/$ID/status.json") == *"password prompt was dismissed"* ]] || fail "dismissed" "$(cat "$STATE/deploy/$ID/status.json")"
 pass "without the docker group a start is one pkexec of this file with the recipe, port and card; a dismissed prompt is the reason shown"
+"$CLI" stop "$ID"
+
+# A worker gone with a reboot or a crash leaves its pid in status.json, where another process group can have it
+# since: the snapshot reads the model as stopped and stop leaves that group alone
+victim=$(setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $!)
+mkdir -p "$STATE/deploy/$ID"
+jq -nc --arg id "$ID" '{id: $id, keys: ["nvidia:0"], port: 12434, agent: "pi", folder: "/", startedAt: "2026-01-01T00:00:00Z"}' >"$STATE/deploy/$ID/config.json"
+jq -nc --argjson p "$victim" '{state: "starting", detail: "loading", percent: 40, error: "", pid: $p, at: "2026-01-01T00:00:00Z"}' >"$STATE/deploy/$ID/status.json"
+"$CLI" snapshot >"$TMP/snap.json"
+"$CLI" stop "$ID"
+kill "$victim" 2>/dev/null || fail "stop signalled a reused pid's group"
+[[ $(jq -r '.deployments[0].error' "$TMP/snap.json") == "stopped unexpectedly; run again" ]] || fail "reused pid" "$(jq -c .deployments "$TMP/snap.json")"
+pass "a worker's pid another process has since is not the worker: the snapshot reads it stopped, stop signals nothing"
+
+# A stop during a root start, which it cannot signal, waits for that start to end before it takes the containers
+# down; the start sees the stop's mark before it builds anything. The pkexec shim leaves the worker's group, as a
+# start the group wait cannot follow
+shim pkexec 'trap "" TERM; printf "%s\n" "$*" >>"$SHIM/pkexec.log"
+case $2 in
+__start) [[ -n ${OUT:-} ]] || OUT=1 exec setsid "$0" "$@"
+  for ((i = 0; i < 50; i++)); do [[ -e $HOME/.local/state/omarchy/local-ai/deploy/$3/cancel ]] && break; sleep 0.2; done
+  sleep 1; echo "1|$(id -u)" >"$SHIM/containers/omarchy-local-ai-$3-engine" ;;
+__stop) rm -f "$SHIM/containers"/* ;;
+esac'
+: >"$SHIM/pkexec.log"
+SHIM_PROMPT=1 "$CLI" run "$ID" nvidia:0
+for ((i = 0; i < 50; i++)); do grep -q __start "$SHIM/pkexec.log" && break; sleep 0.2; done
+SHIM_PROMPT=1 "$CLI" stop "$ID"
+sleep 1.5
+[[ -z $(ls "$SHIM/containers") && ! -d $STATE/deploy/$ID ]] || fail "cancelled root start" "$(ls "$SHIM/containers")"
+mv "$TMP/bin/docker" "$TMP/bin/docker.real"
+shim docker '[[ $1 == pull ]] && : >"$HOME/.local/state/omarchy/local-ai/deploy/'"$ID"'/cancel"; exec docker.real "$@"'
+: >"$SHIM/docker.log"
+"$CLI" run "$ID" nvidia:0
+for ((i = 0; i < 50; i++)); do [[ -e $STATE/deploy/$ID/cancel && -z $(pgrep -f "__worker $ID ") ]] && break; sleep 0.2; done
+! grep -q -e "^run " -e "^network create" "$SHIM/docker.log" || fail "a start built containers after the stop's mark" "$(cat "$SHIM/docker.log")"
+mv -f "$TMP/bin/docker.real" "$TMP/bin/docker"
+"$CLI" stop "$ID"
+shim pkexec 'printf "%s\n" "$*" >>"$SHIM/pkexec.log"; exit 126'
+pass "a stop during a root start leaves no containers: the start checks the stop's mark, the stop waits for the start to end"

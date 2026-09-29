@@ -44,6 +44,8 @@ notify() { omarchy-notification-send --app-name "Local AI" "$@" 2>/dev/null || e
 valid_id() { [[ $1 =~ ^[a-z0-9][a-z0-9.-]{0,63}$ ]]; }
 valid_key() { [[ $1 =~ ^(nvidia|intel-xpu|amd-rocm):[0-9]{1,2}$ ]]; }
 dir_of() { printf '%s/deploy/%s' "$STATE" "$1"; }
+# worker_of <pid> <id>: that pid is still this model's __worker, not one reused after a reboot or a crash
+worker_of() { [[ $1 =~ ^[1-9][0-9]*$ && $(tr '\0' ' ' 2>/dev/null <"/proc/$1/cmdline") == *" __worker $2 "* ]]; }
 
 # status <id> <state> [detail] [percent] [error]: what the widget shows; the log gets each new step once
 status() {
@@ -334,6 +336,8 @@ phase_start() {
     docker image inspect "$v" >/dev/null 2>&1 || docker pull -q "$v" >&2 || die "could not pull $v"
   done
 
+  # a stop while this ran (as root it cannot be signalled) left its mark: build nothing it would miss
+  [[ ! -e $(dir_of "$id")/cancel ]] || die "cancelled"
   remove "$id"
   run=$(rundir "$id")
   mkdir -p "$run/by-path"
@@ -374,6 +378,10 @@ phase_start() {
   if ! "${a[@]}" >/dev/null; then
     remove "$id"
     die "the engine did not start"
+  fi
+  if [[ -e $(dir_of "$id")/cancel ]]; then
+    remove "$id"
+    die "cancelled"
   fi
 
   if ! docker run -d --name "$(gateway "$id")" --restart unless-stopped --security-opt no-new-privileges \
@@ -547,6 +555,7 @@ cmd_run() {
 }
 
 # Stop waits for a starting worker, including a root start it cannot kill, before taking the containers down.
+# It signals only a pid that is still this model's worker: after a reboot or a crash that pid can be anyone's.
 cmd_stop() {
   valid_id "${1:-}" || die "stop <recipe>"
   local d p i
@@ -555,9 +564,14 @@ cmd_stop() {
   : >"$d/cancel"
   if [[ $(jq -r .state "$d/status.json" 2>/dev/null) =~ ^(download|starting)$ ]]; then
     p=$(jq -r '.pid // 0' "$d/status.json")
-    kill -- -"$p" 2>/dev/null || true
-    for ((i = 0; i < 120; i++)); do
-      pgrep -g "$p" >/dev/null || break
+    if worker_of "$p" "$1"; then
+      kill -- -"$p" 2>/dev/null || true
+    else
+      p=0
+    fi
+    # a root start sees the mark before it builds anything, or is taken down below once it ends (up to 10 minutes)
+    for ((i = 0; i < 1200; i++)); do
+      { ((p)) && pgrep -g "$p" >/dev/null; } || pgrep -f -- "__start ${1//./\\.}( |\$)" >/dev/null || break
       sleep 0.5
     done
   fi
@@ -866,7 +880,8 @@ cmd_snapshot() {
       continue
     why=""
     case $st in
-    download | starting | stopping) kill -0 "$pid" 2>/dev/null || why="stopped unexpectedly; run again" ;;
+    download | starting) worker_of "$pid" "$id" || why="stopped unexpectedly; run again" ;;
+    stopping) kill -0 "$pid" 2>/dev/null || why="stopped unexpectedly; run again" ;;
     ready)
       # refused or an empty reply means the engine is gone; a slow answer only means it is busy
       rc=0
