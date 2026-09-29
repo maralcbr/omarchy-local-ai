@@ -18,7 +18,8 @@ function ago(t) {
 }
 function home(dir) { return (dir || "").replace(/^\/home\/[^\/]+/, "~") }
 function find(list, key, v) { return (list || []).filter(function(x) { return x[key] === v })[0] || null }
-function working(d) { return d.state === "download" || d.state === "starting" || d.state === "stopping" }
+// downloading, starting, stopping, or a state this panel does not know yet: not settled either way
+function working(d) { return d.state !== "ready" && d.state !== "error" }
 
 function parse(text) { try { return JSON.parse(text) } catch (e) { return null } }
 
@@ -142,14 +143,27 @@ function groups(s, ui) {
   })
   return out
 }
+// A crashed model no GPU row shows (its card is gone from the list, has no kind, or it never had one): a row of its
+// own, with its reason and dismiss, so the failed mark it raises can always be cleared
+function lost(s, ui) {
+  return (s.deployments || []).filter(function(d) {
+    return d.state === "error" && !(s.gpus || []).some(function(g) { return d.keys.indexOf(g.key) >= 0 && find(s.kinds, "hw", g.hw) })
+  }).map(function(d, at) {
+    var row = { type: "slot", label: d.name, toggle: "pick|lost:" + d.id, open: ui.open === "lost:" + d.id, crashed: true, hint: "crashed",
+      dismiss: "stop|" + d.id }
+    var links = { type: "links", note: d.error || "stopped", items: [{ label: "View logs", action: "log" }, { label: "Config", action: "more|" + d.id }] }
+    return { rank: 2, at: 1000 + at, lost: true, rows: row.open ? [row, links] : [row] }
+  })
+}
 function slots(s, ui, keep) {
-  return (s.gpus || []).map(function(g, at) { return slot(s, ui, g, at) }).concat(groups(s, ui)).filter(function(x) { return keep(x.rank) })
+  return (s.gpus || []).map(function(g, at) { return slot(s, ui, g, at) }).concat(groups(s, ui), lost(s, ui)).filter(function(x) { return keep(x.rank) })
     .sort(function(a, b) { return a.rank - b.rank || a.at - b.at })
 }
 function flat(list) { return [].concat.apply([], list.map(function(x) { return x.rows })) }
 
 // home: your lifetime (once there is one), running models as cards (ready, then starting or stopping), then the
-// available GPUs as rows: free ones, then groups of free cards, then crashed ones to run again or dismiss. A GPU
+// available GPUs as rows: free ones, then groups of free cards, then crashed ones to run again or dismiss (a crash on
+// a card no row shows is a row of its own). A GPU
 // already running a model is not listed again; the rest are one "all GPUs" away.
 function homeView(s, ui) {
   if (!s.gpus) return { title: "LOCAL AI", rows: ui.problem ? [{ type: "error", label: ui.problem }] : [] }
@@ -160,7 +174,7 @@ function homeView(s, ui) {
     .concat((s.deployments || []).filter(function(d) { return working(d) })).forEach(function(d) { rows.push(card(s, d)) })
   var free = slots(s, ui, function(r) { return r < 1 || r === 2 })
   if (free.length) rows = rows.concat([{ type: "sec", label: "AVAILABLE" }], flat(free))
-  if (s.gpus.length > free.filter(function(x) { return !x.group }).length)
+  if (s.gpus.length > free.filter(function(x) { return !x.group && !x.lost }).length)
     rows.push({ type: "field", icon: "gpu", label: "all GPUs", value: String(s.gpus.length), action: "gpus" })
   return { title: "LOCAL AI", version: s.version, rows: rows }
 }
