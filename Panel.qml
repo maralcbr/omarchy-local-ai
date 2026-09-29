@@ -113,7 +113,7 @@ Panel {
     case "stop": run(["stop", a[1]]); home(); break
     case "open": run(["open", a[1]]); root.close(); break
     case "share": run(["share", a[1]]); break
-    case "set": run(["set", a[1], a[2]].concat(a[3] ? [a[3]] : [])); nav({ open: "" }); break
+    case "set": run(["set", a[1], decodeURIComponent(a[2])].concat(a[3] ? [a[3]] : [])); nav({ open: "" }); break
     case "more": nav({ view: "run", id: a[1] }); break
     case "kind": nav({ view: "kind", id: a[1], key: a[2] || "" }); break
     case "group": nav({ view: "group", id: a[1], key: a[2] }); break
@@ -727,7 +727,7 @@ Panel {
                     background: Rectangle { color: "transparent"; border.width: 1; border.color: root.ruleTone }
                     onAccepted: {
                       var path = text.indexOf("~") === 0 ? Quickshell.env("HOME") + text.slice(1) : text
-                      root.activate("set|folder|" + path + "|" + r.id)
+                      root.activate("set|folder|" + encodeURIComponent(path) + "|" + r.id)
                     }
                   }
                 }

@@ -174,6 +174,9 @@ if command -v node >/dev/null; then
     [c.build(s, ui()).rows.find(r => r.type === "run").primary.action, c.build(s, ui({view: "run", id: "m"})).rows.pop().items[1].action].join(",")') == "," ]] ||
     fail "Stop while stopping"
   pass "the view model rounds before picking a unit, keeps months on their weeks across DST, and shows a model with no recipe or start"
+  [[ $(js 's.defaults.folder = "/home/x/My Projects/a|b"; var a = c.build(s, ui({view: "kind", id: s.kinds[0].hw, open: "folder"})).rows.find(r => r.on && r.type === "opt").action.split("|")
+    a.length + " " + decodeURIComponent(a[2])') == "4 /home/x/My Projects/a|b" ]] || fail "a folder with a | in it" "$(js 's.defaults.folder = "/a|b"; c.build(s, ui({view: "kind", id: s.kinds[0].hw, open: "folder"})).rows')"
+  pass "a folder with a | in its path is one argument of its action"
 else
   echo "ok - the view model builds from the backend's snapshot # SKIP node is not installed"
 fi
