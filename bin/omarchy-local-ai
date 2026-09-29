@@ -254,12 +254,19 @@ elevate() {
   fi
 }
 
+# asroot returns, never exits, so a caller's `|| true` cleanup still runs; a dismissed prompt is 126
 asroot() {
-  priv_target || die "refusing to run $TARGET as root: it is not a plain file"
   local rc=0
+  if ! priv_target; then
+    printf 'local-ai: refusing to run %s as root: it is not a plain file\n' "$TARGET" >&2
+    return 1
+  fi
   # each phase is its own first argument, so the password prompt can say what it is for
   pkexec "$TARGET" "__$1" "${@:2}" || rc=$?
-  ((rc != 126 && rc != 127)) || die "the password prompt was dismissed; nothing changed"
+  if ((rc == 126 || rc == 127)); then
+    printf 'local-ai: the password prompt was dismissed; nothing changed\n' >&2
+    return 126
+  fi
   return $rc
 }
 
@@ -408,7 +415,8 @@ phase_share() {
   valid_id "$1" && [[ ${2:-} =~ ^(on|off)$ ]] && ours "$(gateway "$1")" || die "$1 is not running"
   p=$(docker port "$(gateway "$1")" | grep -o '127\.0\.0\.1:[0-9]*' | head -1 | cut -d: -f2)
   [[ $p =~ ^[0-9]{4,5}$ ]] || die "no gateway port"
-  serve "$p" "$2"
+  # a hung (124) or missing (127) tailscale must not read as pkexec's dismissed prompt
+  serve "$p" "$2" || die "tailscale would not change the share"
 }
 
 # This user's containers and networks, and the engine images the recipes name (Docker keeps any another container uses)
@@ -421,7 +429,8 @@ phase_purge() {
   jq -r '.gateway.image, .hardware[].recipes[].image' "$RECIPES" | sort -u | xargs -r docker rmi >/dev/null 2>&1 || true
 }
 
-# fail <message>: take the containers down and stop with the message
+# fail <message>: take the containers down and stop with the message, written after the cleanup's own so the
+# reason shown is this one
 fail() {
   elevate stop "$WID" || true
   die "$*"
@@ -562,8 +571,9 @@ cmd_stop() {
     done
   fi
   status "$1" stopping "" 0
-  if [[ $(jq -r '.shared // false' "$d/config.json" 2>/dev/null) == "true" ]]; then
-    cmd_share "$1" off || true
+  # a share that will not turn off (tailscale down, the prompt dismissed) still lets the containers go
+  if [[ $(jq -r '.shared // false' "$d/config.json" 2>/dev/null) == "true" ]] && ! (cmd_share "$1" off); then
+    printf 'local-ai: the tailscale share of %s is still on\n' "$1" >&2
   fi
   if ! elevate stop "$1"; then
     status "$1" error "" 0 "could not stop it; try again"
@@ -729,13 +739,17 @@ cmd_open() {
 
 # share <id> [off]: tailscale serve as you when you are the tailnet's operator, else through the same prompt as a start
 cmd_share() {
-  local f on=${2:-on} p
+  local f on=${2:-on} p rc=0
   f=$(dir_of "${1:-}")/config.json
   valid_id "${1:-}" && [[ -f $f ]] || die "$1 is not running"
+  # no tailscale is nothing a password could fix
+  omarchy-cmd-present tailscale || die "tailscale is not installed"
   p=$(jq -r .port "$f")
-  serve "$p" "$on" || asroot share "$1" "$on" || die "tailscale would not change the share"
-  jq --argjson s "$([[ $on == "on" ]] && echo true || echo false)" '.shared = $s' "$f" >"$f.tmp"
-  mv -f "$f.tmp" "$f"
+  serve "$p" "$on" || asroot share "$1" "$on" || rc=$?
+  # a dismissed prompt has already said so
+  ((rc != 126)) || exit 1
+  ((rc == 0)) || die "tailscale would not change the share"
+  jq --argjson s "$([[ $on == "on" ]] && echo true || echo false)" '.shared = $s' "$f" >"$f.tmp" && mv -f "$f.tmp" "$f"
 }
 
 # summary <usage dir>: one model's usage so far, kept in summary.json beside its log and brought up to date by reading

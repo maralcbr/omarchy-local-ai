@@ -265,3 +265,51 @@ wait_for error
 grep -qx "$CLI __start $ID 12434 nvidia:0" "$SHIM/pkexec.log" || fail "pkexec argv" "$(cat "$SHIM/pkexec.log")"
 [[ $(jq -r .error "$STATE/deploy/$ID/status.json") == *"password prompt was dismissed"* ]] || fail "dismissed" "$(cat "$STATE/deploy/$ID/status.json")"
 pass "without the docker group a start is one pkexec of this file with the recipe, port and card; a dismissed prompt is the reason shown"
+"$CLI" stop "$ID"
+
+# A shared model stops even when its share will not turn off (tailscaled down, not the operator and the prompt
+# dismissed): the containers go, and the stop does not end half done
+shim tailscale 'case "$*" in
+"status --json") echo "{\"Self\":{\"DNSName\":\"box.tail.ts.net.\"}}" ;;
+serve*) [[ -f $SHIM/ts.fail ]] && exit 1; exit 0 ;;
+esac'
+"$CLI" run "$ID" nvidia:0
+wait_for ready
+"$CLI" share "$ID"
+[[ $(jq -r .shared "$STATE/deploy/$ID/config.json") == true ]] || fail "share" "$(cat "$STATE/deploy/$ID/config.json")"
+touch "$SHIM/ts.fail"
+"$CLI" stop "$ID" 2>"$TMP/err" || fail "stop of a shared model" "$(cat "$TMP/err")"
+[[ ! -d $STATE/deploy/$ID && -z $(ls "$SHIM/containers") ]] || fail "shared stop" "$(ls "$SHIM/containers" "$STATE/deploy")"
+grep -q "share of $ID is still on" "$TMP/err" || fail "shared stop warning" "$(cat "$TMP/err")"
+rm -f "$SHIM/ts.fail"
+pass "a shared model whose share will not turn off still stops, taking its containers down"
+
+# Without tailscale a share is refused at once, never a password prompt that could not help
+"$CLI" run "$ID" nvidia:0
+wait_for ready
+shim tailscale 'exit 127'
+shim omarchy-cmd-present '[[ $1 != tailscale ]] && command -v "$1" >/dev/null'
+: >"$SHIM/pkexec.log"
+"$CLI" share "$ID" 2>"$TMP/err" && fail "share without tailscale"
+grep -q "tailscale is not installed" "$TMP/err" && [[ ! -s $SHIM/pkexec.log ]] || fail "no tailscale" "$(cat "$TMP/err" "$SHIM/pkexec.log")"
+shim omarchy-cmd-present 'command -v "$1" >/dev/null'
+rm -f "$TMP/bin/tailscale"
+"$CLI" stop "$ID"
+pass "a share without tailscale installed fails with that reason, without asking for the password"
+
+# A start that fails for its own reason keeps it when the cleanup's prompt is then dismissed: here the root
+# start succeeds, the gateway answers without the key, and the stop that follows is dismissed
+shim pkexec 'printf "%s\n" "$*" >>"$SHIM/pkexec.log"
+case $2 in
+__start) for c in engine gateway; do echo "1|$(id -u)" >"$SHIM/containers/omarchy-local-ai-$3-$c"; done ;;
+*) exit 126 ;;
+esac'
+mv "$TMP/bin/curl" "$TMP/bin/curl-shim"
+shim curl '[[ $* == "-fsS --max-time 5 "* ]] && exit 0; exec curl-shim "$@"'
+SHIM_PROMPT=1 "$CLI" run "$ID" nvidia:0
+wait_for error
+grep -q "__stop $ID" "$SHIM/pkexec.log" || fail "cleanup prompt" "$(cat "$SHIM/pkexec.log")"
+[[ $(jq -r .error "$STATE/deploy/$ID/status.json") == "the gateway answers without the key" ]] || fail "failure reason" "$(cat "$STATE/deploy/$ID/status.json")"
+mv -f "$TMP/bin/curl-shim" "$TMP/bin/curl"
+"$CLI" stop "$ID"
+pass "a start's own failure stays the reason shown when the prompt of its cleanup is dismissed"
