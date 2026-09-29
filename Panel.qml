@@ -15,7 +15,7 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  readonly property string cli: String(Qt.resolvedUrl("bin/omarchy-local-ai")).replace(/^file:\/\//, "")
+  readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/omarchy-local-ai")).replace(/^file:\/\//, ""))
   readonly property color theme: bar ? bar.foreground : Color.foreground
   readonly property color bg: Color.popups.background
   readonly property color surface: Util.alpha(theme, 0.06)
@@ -66,10 +66,13 @@ Panel {
   property bool copied: false
   property bool revealed: false
   property var queue: []
+  // why the last snapshot failed, shown on home until one succeeds; a refresh asked for while one runs
+  property string failure: ""
+  property bool again: false
   // A snapshot the view cannot read says so, rather than looking like a machine with no GPU
   readonly property var view: {
     try {
-      return Model.build(snap, ui)
+      return Model.build(snap, failure && !ui.problem ? Object.assign({}, ui, { problem: failure }) : ui)
     } catch (e) {
       return { title: "LOCAL AI", mark: "failed", rows: [{ type: "error", label: "could not read the backend's answer: " + e.message }] }
     }
@@ -89,7 +92,8 @@ Panel {
     verb.command = [cli].concat(queue.shift())
     verb.running = true
   }
-  function refresh() { if (!poll.running) poll.running = true }
+  // a refresh while a snapshot runs (the one after a verb) runs once that ends, so the verb's result shows at once
+  function refresh() { if (poll.running) again = true; else poll.running = true }
 
   // The space above row i: a group opens a gap, a surface follows a surface closely, rows in a group touch
   function gapBefore(i) {
@@ -126,7 +130,23 @@ Panel {
   Process {
     id: poll
     command: [root.cli, "snapshot"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.snap = Model.parse(text) || root.snap }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var s = Model.parse(text)
+        if (s) { root.snap = s; root.failure = "" }
+        else if (!root.failure) root.failure = "could not read the backend"
+      }
+    }
+    // a snapshot that fails says why on its last "local-ai:" line, else that the backend could not be read
+    stderr: StdioCollector { id: pollErr; waitForEnd: true }
+    onExited: function(code) {
+      if (code !== 0) {
+        var m = (pollErr.text || "").split("\n").filter(function(l) { return l.indexOf("local-ai: ") === 0 }).pop()
+        root.failure = m ? m.slice(10) : "could not read the backend"
+      }
+      if (root.again) { root.again = false; Qt.callLater(root.refresh) }
+    }
   }
   // A verb that fails says why on its last "local-ai:" line; the panel opens to show it
   Process {
